@@ -34,6 +34,10 @@ export interface CreateStaticServerOptions {
   base?: string;
   /** 未命中文件时是否回退到 index.html（SPA 必需）。默认 true */
   spaFallback?: boolean;
+  /** 预渲染期间对接口请求的兜底响应。详见 PrerenderOptions.apiFallback */
+  apiFallback?: unknown | ((url: string) => unknown);
+  /** 需要兜底的接口路径前缀，默认 /api/ */
+  apiFallbackPrefix?: string;
   /** 日志实例 */
   logger?: Logger;
 }
@@ -41,6 +45,17 @@ export interface CreateStaticServerOptions {
 /** 归一化 base 路径：始终以 / 开头、不以 / 结尾，根路径返回空字符串 */
 export function normalizeBase(base?: string): string {
   return `/${(base || '').replace(/^\/+|\/+$/g, '')}`.replace(/\/$/, '');
+}
+
+/** 解析接口兜底响应。未配置、路径不匹配或函数返回空值时返回 undefined */
+export function resolveApiFallback(
+  urlPath: string,
+  apiFallback: unknown | ((url: string) => unknown),
+  apiFallbackPrefix = '/api/',
+): unknown {
+  if (apiFallback === undefined || apiFallback === null) return undefined;
+  if (!urlPath.startsWith(apiFallbackPrefix)) return undefined;
+  return typeof apiFallback === 'function' ? apiFallback(urlPath) : apiFallback;
 }
 
 /**
@@ -51,6 +66,7 @@ export function createStaticServer(options: CreateStaticServerOptions): Promise<
   const { root, spaFallback = true, logger } = options;
   const rootDir = path.resolve(root);
   const basePath = normalizeBase(options.base);
+  const { apiFallback, apiFallbackPrefix } = options;
 
   const server = http.createServer((req, res) => {
     try {
@@ -67,6 +83,18 @@ export function createStaticServer(options: CreateStaticServerOptions): Promise<
       }
 
       if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) filePath = path.join(filePath, 'index.html');
+
+      // 接口兜底优先于 SPA 回退：否则 /api/xxx 会拿到 index.html，
+      // 前端 JSON 解析失败，产生大量页面运行时错误
+      if (!fs.existsSync(filePath)) {
+        const body = resolveApiFallback(urlPath, apiFallback, apiFallbackPrefix);
+        if (body !== undefined && body !== null) {
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify(body));
+          return;
+        }
+      }
+
       if (!fs.existsSync(filePath) && spaFallback) filePath = path.join(rootDir, 'index.html');
 
       if (!fs.existsSync(filePath)) {

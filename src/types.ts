@@ -113,6 +113,19 @@ export interface PrerenderOptions extends RenderOptions {
   staticDir?: string;
   /** 内置静态服务端口，默认随机可用端口 */
   staticPort?: number;
+  /**
+   * 预渲染期间对接口请求的兜底响应。
+   *
+   * 预渲染时通常没有后端，接口失败会产生大量页面运行时错误，
+   * 甚至让产物缺失依赖接口的内容。配置后，未命中的接口请求
+   * 会返回该响应（JSON），而不是回退到 index.html。
+   *
+   * - 对象/数组：直接作为响应体
+   * - 函数：`(url) => 响应体`，返回 `undefined` 表示不兜底、沿用原逻辑
+   */
+  apiFallback?: unknown | ((url: string) => unknown);
+  /** 需要兜底的接口路径前缀，默认 `/api/` */
+  apiFallbackPrefix?: string;
   /** 并发渲染数量，默认 5 */
   concurrency?: number;
   /** 是否强制重新渲染，忽略已存在的产物。默认 false */
@@ -382,6 +395,14 @@ export type VitePrerenderOptions = Omit<PrerenderOptions, 'outDir'> & {
    * 与预渲染产物形如 /about/index.html 的目录结构配合使用
    */
   previewFallback?: string;
+  /**
+   * 预渲染使用的服务类型，默认 `auto`：
+   * - `auto`：优先 `vite preview`，失败时回退内置静态服务
+   * - `vite`：仅使用 `vite preview`
+   * - `builtin`：仅使用内置静态服务。更轻量，且**不会继承 vite 的 server.proxy**，
+   *   可避免预渲染时因后端未启动产生大量代理错误，同时支持 apiFallback
+   */
+  server?: 'auto' | 'vite' | 'builtin';
 };
 
 /** webpack 钩子(Hook)的最小结构 */

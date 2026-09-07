@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { removeInlineStyle, replaceAll, transformHtml } from '../src/core/html.js';
+import { createStaticServer, resolveApiFallback } from '../src/core/static-server.js';
+import type { StaticServer } from '../src/types.js';
 import { runConcurrency } from '../src/utils/concurrency.js';
 import { createLogger } from '../src/utils/logger.js';
 
@@ -63,5 +68,57 @@ describe('runConcurrency', () => {
 
   it('空任务列表应返回空数组', async () => {
     expect(await runConcurrency([], 5)).toEqual([]);
+  });
+});
+
+describe('apiFallback', () => {
+  it('未配置或路径不匹配时不兜底', () => {
+    expect(resolveApiFallback('/api/system/info', undefined)).toBeUndefined();
+    expect(resolveApiFallback('/assets/app.js', { ok: true })).toBeUndefined();
+  });
+
+  it('支持对象与函数形式，函数返回空值时沿用原逻辑', () => {
+    expect(resolveApiFallback('/api/system/info', { success: true })).toEqual({ success: true });
+    expect(resolveApiFallback('/api/system/info', (url) => (url.includes('system') ? { data: 1 } : undefined))).toEqual({ data: 1 });
+    expect(resolveApiFallback('/api/other', (url) => (url.includes('system') ? { data: 1 } : undefined))).toBeUndefined();
+  });
+
+  it('支持自定义前缀', () => {
+    expect(resolveApiFallback('/v1/ping', { ok: 1 }, '/v1/')).toEqual({ ok: 1 });
+  });
+});
+
+describe('内置静态服务', () => {
+  let rootDir = '';
+  let server: StaticServer | null = null;
+
+  beforeAll(async () => {
+    rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'prerender-kit-api-'));
+    fs.writeFileSync(path.join(rootDir, 'index.html'), '<html><body>shell</body></html>');
+    server = await createStaticServer({
+      root: rootDir,
+      apiFallback: (url) => (url.includes('/system/info') ? { success: true, data: {} } : undefined),
+    });
+  });
+
+  afterAll(async () => {
+    await server?.close();
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  });
+
+  it('命中的接口应返回兜底 JSON，而不是 index.html', async () => {
+    const res = await fetch(`${server?.url}/api/system/info`);
+    expect(res.headers.get('content-type')).toContain('application/json');
+    expect(await res.json()).toEqual({ success: true, data: {} });
+  });
+
+  it('未兜底的接口应回退到 SPA 入口', async () => {
+    const res = await fetch(`${server?.url}/api/unknown`);
+    expect(await res.text()).toContain('shell');
+  });
+
+  it('普通页面请求不受影响', async () => {
+    const res = await fetch(`${server?.url}/about`);
+    expect(await res.text()).toContain('shell');
   });
 });

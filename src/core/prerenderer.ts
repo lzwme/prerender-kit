@@ -448,6 +448,8 @@ export class Prerenderer {
       root: this.options.staticDir || this.options.outDir,
       port: this.options.staticPort,
       base: this.options.base,
+      apiFallback: this.options.apiFallback,
+      apiFallbackPrefix: this.options.apiFallbackPrefix,
       logger: this.logger,
     });
   }

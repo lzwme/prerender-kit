@@ -26,7 +26,7 @@ export {
   resolveStateFile,
   saveState,
 } from './core/state.js';
-export { createStaticServer } from './core/static-server.js';
+export { createStaticServer, normalizeBase, resolveApiFallback } from './core/static-server.js';
 export { createOptimizeStats, findHtmlFiles, mergeOptimizeStats, optimizeHtmlFiles } from './optimize/files.js';
 export {
   addLoadingIndicator,

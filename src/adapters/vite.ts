@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Prerenderer } from '../core/prerenderer.js';
 import { createStaticServer } from '../core/static-server.js';
-import type { VitePrerenderOptions, VitePrerenderPlugin, ViteResolvedConfigLike } from '../types.js';
+import type { PrerenderOptions, VitePrerenderOptions, VitePrerenderPlugin, ViteResolvedConfigLike } from '../types.js';
 import { resolveLogger } from '../utils/logger.js';
 
 /** 预览服务的最小抽象：vite preview 与内置静态服务都满足该结构 */
@@ -28,10 +28,28 @@ interface PreviewRequestLike {
  * 优先使用 vite 自身的 preview API（比 spawn `vite preview` 子进程更可靠、无需解析 stdout）；
  * 若不可用则回退到内置的静态服务。
  */
-async function startPreviewServer(
-  cfg: { root: string; base: string; outDir: string },
-  logger = resolveLogger(undefined),
-): Promise<PreviewServer> {
+interface PreviewServerConfig {
+  root: string;
+  base: string;
+  outDir: string;
+  /** 服务类型，builtin 时不使用 vite preview */
+  server?: 'auto' | 'vite' | 'builtin';
+  apiFallback?: PrerenderOptions['apiFallback'];
+  apiFallbackPrefix?: string;
+}
+
+async function startPreviewServer(cfg: PreviewServerConfig, logger = resolveLogger(undefined)): Promise<PreviewServer> {
+  const builtin = (): Promise<PreviewServer> =>
+    createStaticServer({
+      root: cfg.outDir,
+      base: cfg.base,
+      apiFallback: cfg.apiFallback,
+      apiFallbackPrefix: cfg.apiFallbackPrefix,
+      logger,
+    });
+
+  if (cfg.server === 'builtin') return builtin();
+
   try {
     // ESM 产物下可直接使用原生 import()，无需间接构造
     const vite = await import('vite');
@@ -59,7 +77,7 @@ async function startPreviewServer(
     logger.debug?.(`启动 vite 预览服务失败，回退内置静态服务: ${String(error)}`);
   }
 
-  return createStaticServer({ root: cfg.outDir, base: cfg.base, logger });
+  return builtin();
 }
 
 /**
@@ -113,7 +131,19 @@ export function createVitePlugin(options: VitePrerenderOptions): VitePrerenderPl
 
       let server: PreviewServer | null = null;
       try {
-        server = options.baseUrl ? null : await startPreviewServer({ root: cfg.root, base: cfg.base, outDir }, logger);
+        server = options.baseUrl
+          ? null
+          : await startPreviewServer(
+              {
+                root: cfg.root,
+                base: cfg.base,
+                outDir,
+                server: options.server,
+                apiFallback: options.apiFallback,
+                apiFallbackPrefix: options.apiFallbackPrefix,
+              },
+              logger,
+            );
         await new Prerenderer({
           ...options,
           outDir,
