@@ -54,6 +54,46 @@ export type HtmlCallback = (html: string, route: string) => string | void | Prom
 /** 产物文件路径解析。返回空字符串表示该路由无效、将被跳过 */
 export type OutputFileResolver = (route: string, outDir: string) => string;
 
+/** 断点续传配置 */
+export interface ResumeOptions {
+  /** 状态文件路径。默认 `<outDir>/.prerender-state.json` */
+  file?: string;
+}
+
+/** 状态文件中单个路由的记录 */
+export interface PrerenderStateRoute {
+  /** 已完成 / 上次失败（失败的下次运行会自动重试） */
+  status: 'done' | 'failed';
+  /** 产物文件路径 */
+  file: string;
+  /** 产物大小，用于校验产物完整性 */
+  size: number;
+  /** 产物最后修改时间 */
+  mtime: number;
+  /** 该记录的更新时间 */
+  updatedAt: number;
+  /** 失败原因（仅 status 为 failed 时存在） */
+  error?: string;
+}
+
+/** 断点续传状态（可安全落盘为 JSON） */
+export interface PrerenderState {
+  version: 1;
+  /**
+   * 构建指纹。指纹变化意味着构建产物已更新，已有状态全部失效并全量重渲染。
+   * 默认根据 `<outDir>/assets/` 文件名列表（自带 content hash）自动计算，也可通过 buildId 指定
+   */
+  signature: string;
+  /** 产物输出目录 */
+  outDir: string;
+  /** 首次创建时间 */
+  startedAt: number;
+  /** 最后更新时间 */
+  updatedAt: number;
+  /** 路由 -> 记录 */
+  routes: Record<string, PrerenderStateRoute>;
+}
+
 /** 预渲染配置 */
 export interface PrerenderOptions extends RenderOptions {
   /** 需要预渲染的路由列表，如 ['/', '/zh', '/en/about'] */
@@ -79,6 +119,23 @@ export interface PrerenderOptions extends RenderOptions {
   force?: boolean;
   /** 产物有效期(分钟)，默认 60。产物修改时间距今超过该值则重新渲染。设置 0 表示总是重新渲染 */
   maxAge?: number;
+  /**
+   * 断点续传：渲染被中断(崩溃 / Ctrl+C / CI 超时)后，再次运行可从上次进度继续。
+   * 默认关闭。
+   * - `true`：使用默认状态文件 `<outDir>/.prerender-state.json`
+   * - 对象：自定义状态文件路径，详见 ResumeOptions
+   *
+   * 与 `maxAge` 的区别：`maxAge` 基于「产物修改时间」判断新旧，无法区分
+   * 「本次构建渲染的」与「上次构建遗留的」；断点续传通过构建指纹确保
+   * 只有同一份构建产物的路由才会被复用
+   */
+  resume?: boolean | ResumeOptions;
+  /**
+   * 构建指纹，用于断点续传的状态校验。指定后，该值变化会使已有状态失效并全量重渲染。
+   * 未指定时自动根据 `<outDir>/assets/` 下的文件名列表计算（构建产物文件名自带 content hash）。
+   * 刻意不包含入口 index.html——预渲染 `/` 会覆写该文件，纳入会导致同一份构建的两次运行指纹不同
+   */
+  buildId?: string;
   /** 是否移除页面中的内联 <style> 标签，默认 true */
   removeStyle?: boolean;
   /**
@@ -285,6 +342,8 @@ export interface PrerenderResult extends ResolveRoutesResult {
   files: string[];
   /** 通过链接发现而新增的路由（discoverLinks 开启时） */
   discovered: string[];
+  /** 通过断点续传状态恢复、跳过渲染的路由（resume 开启时） */
+  resumed: string[];
   /** 页面运行时错误：route -> 错误信息列表 */
   pageErrors: Record<string, string[]>;
   /** HTML 瘦身统计（仅开启 optimize 时存在） */

@@ -84,6 +84,8 @@ export function createProgram(): Command {
     .option('--wait-until <strategy>', '页面等待策略: load | domcontentloaded | networkidle0 | networkidle2')
     .option('--wait-for <selector>', '渲染前等待出现的选择器，默认 body')
     .option('--force', '强制重新渲染，忽略已存在的产物')
+    .option('--resume', '启用断点续传：中断后再次运行可从上次进度继续')
+    .option('--build-id <id>', '构建指纹。变化时断点状态失效并全量重新渲染')
     .option('--discover-links', '从产物中自动发现站内链接并加入预渲染队列')
     .option('--max-routes <num>', '预渲染路由总数上限，含自动发现的路由')
     .option('--fail-on-page-error', '页面存在运行时错误时视为渲染失败')
@@ -136,6 +138,9 @@ export async function run(argv: string[] = process.argv): Promise<number> {
     concurrency: parseCliNumber(opts.concurrency) ?? config.concurrency,
     delay: parseCliNumber(opts.delay) ?? config.delay,
     maxAge: parseCliNumber(opts.maxAge) ?? config.maxAge,
+    buildId: (opts.buildId as string) || config.buildId,
+    // CLI 只负责开关；自定义状态文件路径等细节配置以配置文件为准，避免双入口合并冲突
+    resume: opts.resume ? (typeof config.resume === 'object' ? config.resume : true) : config.resume,
   };
 
   if (!options.routes.length || !options.outDir) {
@@ -153,7 +158,9 @@ export async function run(argv: string[] = process.argv): Promise<number> {
 function printSummary(result: PrerenderResult, silent?: boolean): void {
   if (silent) return;
   if (result.rendered.length) console.log(`\n成功渲染: ${result.rendered.length} 个`);
-  if (result.skipped.length) console.log(`已跳过(产物在有效期内): ${result.skipped.length} 个`);
+  if (result.resumed.length) console.log(`断点续传恢复: ${result.resumed.length} 个`);
+  const skippedByFreshness = result.skipped.length - result.resumed.length;
+  if (skippedByFreshness) console.log(`已跳过(产物在有效期内): ${skippedByFreshness} 个`);
   if (result.expired.length) console.log(`重新渲染(过期或强制): ${result.expired.length} 个`);
   if (result.discovered.length) console.log(`自动发现的路由: ${result.discovered.length} 个 -> ${result.discovered.join(', ')}`);
   if (result.invalid.length) console.log(`无效路由: ${result.invalid.length} 个`);

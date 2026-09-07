@@ -112,9 +112,11 @@ export function createPuppeteerRenderer(options: PuppeteerRendererOptions = {}):
       const launchOptions: Record<string, unknown> = {
         headless: true,
         args: ['--no-sandbox', '--disable-setuid-sandbox'],
-        executablePath: String(options.launchOptions?.executablePath ?? '').trim() || resolveExecutablePath() || undefined,
         ...options.launchOptions,
       };
+      // 显式配置优先，其次环境变量，最后交由 puppeteer 自带的 Chromium
+      const executablePath = String(options.launchOptions?.executablePath ?? '').trim() || resolveExecutablePath();
+      if (executablePath) launchOptions.executablePath = executablePath;
       browser = await puppeteer.launch(launchOptions);
     },
     async render(url: string, renderOptions: RenderOptions = {}) {

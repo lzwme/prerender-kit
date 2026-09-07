@@ -10,6 +10,7 @@ import type {
   Logger,
   PrerenderOptions,
   PrerenderResult,
+  PrerenderState,
   Renderer,
   ResolvedPrerenderOptions,
   SitemapOptions,
@@ -22,10 +23,17 @@ import { transformHtml } from './html.js';
 import { extractLinks } from './links.js';
 import { createPuppeteerRenderer } from './renderer.js';
 import { buildPageUrl, defaultOutputFile, getMaxAgeMs, isRouteFresh, normalizeRoutes } from './routes.js';
+import { createState, isRouteResumable, loadState, markStateRoute, resolveSignature, resolveStateFile, saveState } from './state.js';
 import { createStaticServer } from './static-server.js';
 
 const DEFAULT_CONCURRENCY = 5;
 const DEFAULT_VIEWPORT = { width: 1024, height: 768 };
+
+/**
+ * 断点状态落盘的最小间隔(ms)：路由极多时避免每完成一个路由都全量序列化状态文件。
+ * render() 结束时会无条件再落盘一次，进程被强杀最多丢失最近一个时间窗内完成的进度
+ */
+const STATE_FLUSH_INTERVAL_MS = 500;
 
 /** 填充默认值 */
 export function resolveOptions(options: PrerenderOptions): ResolvedPrerenderOptions {
@@ -75,11 +83,24 @@ export class Prerenderer {
 
   private server: StaticServer | null = null;
 
+  /** 断点续传：状态文件路径，为空表示未开启 */
+  private readonly stateFile: string;
+
+  /** 断点续传：当前状态 */
+  private state: PrerenderState | null = null;
+
+  /** 断点续传：构建指纹 */
+  private signature = '';
+
+  /** 断点续传：上次状态落盘的时间戳(ms) */
+  private lastFlushAt = 0;
+
   constructor(options: PrerenderOptions) {
     this.options = resolveOptions(options);
     this.outputFile = options.outputFile || defaultOutputFile;
     this.optimizeOptions = resolveOptimizeOptions(options.optimize);
     this.logger = resolveLogger(options.logger);
+    this.stateFile = resolveStateFile(this.options.outDir, options.resume);
   }
 
   /** 执行预渲染 */
@@ -97,9 +118,12 @@ export class Prerenderer {
       failed: [],
       files: [],
       discovered: [],
+      resumed: [],
       pageErrors: {},
       duration: 0,
     };
+
+    this.initState();
 
     const seen = new Set<string>();
     let frontier = this.seedRoutes(result, seen);
@@ -117,7 +141,18 @@ export class Prerenderer {
             continue;
           }
 
-          if (isRouteFresh(file, options.force, options.maxAge)) {
+          // 断点续传优先：同一份构建产物下已完成的路由直接复用，不受 maxAge 限制
+          if (this.isResumable(route, file)) {
+            result.resumed.push(route);
+            result.skipped.push(route);
+            if (options.discoverLinks) foundLinks.push(...this.discover(readHtml(file), route));
+            continue;
+          }
+
+          // 未开启断点续传时按产物新鲜度跳过。
+          // 开启后一律以状态与指纹为准：此时「产物存在且新鲜」既可能是上次渲染的，
+          // 也可能是构建刚写出的入口文件（如 / 的 index.html），仅凭新鲜度会误判
+          if (!this.stateFile && isRouteFresh(file, options.force, options.maxAge)) {
             result.skipped.push(route);
             // 命中缓存时仍可从已有产物中继续发现链接，保证增量场景下不会漏掉路由
             if (options.discoverLinks) foundLinks.push(...this.discover(readHtml(file), route));
@@ -136,6 +171,7 @@ export class Prerenderer {
         frontier = this.nextFrontier(foundLinks, seen, result);
       }
     } finally {
+      this.flushState();
       await this.closeAll();
     }
 
@@ -163,11 +199,16 @@ export class Prerenderer {
       });
     }
 
+    if (result.resumed.length) {
+      logger.info(`断点续传：${result.resumed.length} 个路由已在上次运行中完成，本次直接复用`);
+    }
+
+    const cached = result.skipped.length - result.resumed.length;
     if (options.force) {
       if (result.expired.length) logger.info(`已忽略已有产物，强制重新渲染 ${result.expired.length} 个路由`);
-    } else if (result.skipped.length || result.expired.length) {
+    } else if (cached || result.expired.length) {
       logger.info(
-        `增量预渲染：${result.skipped.length} 个产物在 ${Math.round(getMaxAgeMs(options.maxAge) / 60000)} 分钟内已跳过，` +
+        `增量预渲染：${cached} 个产物在 ${Math.round(getMaxAgeMs(options.maxAge) / 60000)} 分钟内已跳过，` +
           `${result.expired.length} 个已过期重新渲染。设置 force: true 可强制全量重新渲染`,
       );
     }
@@ -236,20 +277,25 @@ export class Prerenderer {
       const route = routes[index];
       const errors = this.collectErrors(route, baseUrl, result);
 
+      const file = this.outputFile(route, options.outDir);
+
       if (item.status === 'rejected') {
         result.failed.push(route);
+        this.markRoute(route, 'failed', file, item.reason);
         logger.error(`路由 ${route} 预渲染失败：`, item.reason);
         return;
       }
 
       if (options.failOnPageError && errors.length) {
         result.failed.push(route);
+        this.markRoute(route, 'failed', file, errors.join('; '));
         logger.error(`路由 ${route} 存在页面运行时错误：\n  ${errors.join('\n  ')}`);
         return;
       }
 
       result.rendered.push(route);
       result.files.push(item.value as string);
+      this.markRoute(route, 'done', file);
       if (options.discoverLinks) foundLinks.push(...this.discover(readHtml(item.value as string), route));
     });
   }
@@ -308,6 +354,52 @@ export class Prerenderer {
     });
     if (links.length) this.logger.debug?.(`路由 ${route} 发现 ${links.length} 个链接`);
     return links;
+  }
+
+  /**
+   * 初始化断点续传状态。
+   * 指纹一致时复用上次进度；指纹变化（构建产物已更新）时重置，避免复用陈旧产物
+   */
+  private initState(): void {
+    if (!this.stateFile) return;
+
+    this.signature = resolveSignature(this.options.outDir, this.options.buildId);
+    const prev = loadState(this.stateFile);
+
+    if (prev && prev.signature === this.signature) {
+      this.state = prev;
+      return;
+    }
+
+    if (prev) this.logger.info('构建产物已更新（指纹变化），断点状态失效，将重新渲染全部路由');
+    this.state = createState(this.signature, this.options.outDir);
+  }
+
+  /** 路由是否可从断点状态恢复。force 为 true 时始终重新渲染 */
+  private isResumable(route: string, file: string): boolean {
+    if (this.options.force || !this.state) return false;
+    return isRouteResumable(this.state, route, file);
+  }
+
+  /** 记录一条路由的渲染结果，按时间节流增量落盘 */
+  private markRoute(route: string, status: 'done' | 'failed', file: string, error?: unknown): void {
+    if (!this.stateFile) return;
+
+    this.state ??= createState(this.signature, this.options.outDir);
+    markStateRoute(this.state, route, status, file, error);
+
+    if (Date.now() - this.lastFlushAt >= STATE_FLUSH_INTERVAL_MS) this.flushState();
+  }
+
+  /** 将状态写入磁盘 */
+  private flushState(): void {
+    if (!this.stateFile || !this.state) return;
+    this.lastFlushAt = Date.now();
+    try {
+      saveState(this.stateFile, this.state);
+    } catch (error) {
+      this.logger.warn(`断点状态写入失败(${this.stateFile})：${String(error)}`);
+    }
   }
 
   /** 需要从产物中清理掉的地址：默认清理用于渲染的站点地址，附加用户自定义的 replaceUrl */

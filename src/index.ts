@@ -16,6 +16,16 @@ export {
   normalizeRoutes,
   resolveRoutes,
 } from './core/routes.js';
+export {
+  createState,
+  DEFAULT_STATE_FILE,
+  isRouteResumable,
+  loadState,
+  markStateRoute,
+  resolveSignature,
+  resolveStateFile,
+  saveState,
+} from './core/state.js';
 export { createStaticServer } from './core/static-server.js';
 export { createOptimizeStats, findHtmlFiles, mergeOptimizeStats, optimizeHtmlFiles } from './optimize/files.js';
 export {
@@ -34,4 +44,5 @@ export { buildRobotsTxt, buildSitemapIndexXml, buildUrlSetXml, escapeXml } from 
 export * from './types.js';
 export { runConcurrency } from './utils/concurrency.js';
 export { isExcluded } from './utils/filter.js';
+export { getMtimeMs, writeFileAtomic, writeFileSafe } from './utils/fs.js';
 export { createLogger, resolveLogger } from './utils/logger.js';

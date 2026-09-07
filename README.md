@@ -64,6 +64,7 @@ export default defineConfig({
 - **开箱即用**：`createVitePlugin` / `PrerenderWebpackPlugin` / `createRollupPlugin`
 - **独立使用**：CLI 或 API 指定 `baseUrl` 即可预渲染（含已部署站点）
 - **增量预渲染**：产物在有效期内自动跳过，支持 `force` 与 `maxAge`
+- **断点续传**：渲染中断后再次运行可从上次进度继续，配合构建指纹避免复用陈旧产物
 - **链接自动发现**：`discoverLinks` 从产物中提取站内链接，逐层扩散
 - **一站式收尾**：可选 HTML 瘦身、sitemap / robots.txt 生成
 - **页面错误可见**：收集 `pageerror` / `console.error`，可配置 `failOnPageError`
@@ -191,7 +192,7 @@ prkit -c prerender.config.js
 /product/compress-image
 ```
 
-常用 CLI 参数：`--force`、`--discover-links`、`--optimize`、`--sitemap --site-url <url>`、`--max-age 0`（每次全量渲染）。完整参数列表请运行 `prkit --help`。
+常用 CLI 参数：`--force`、`--resume`、`--build-id <id>`、`--discover-links`、`--optimize`、`--sitemap --site-url <url>`、`--max-age 0`（每次全量渲染）。完整参数列表请运行 `prkit --help`。
 
 ### 编程式 API
 
@@ -227,6 +228,8 @@ console.log(result.rendered, result.skipped, result.failed);
 | `concurrency` | `number` | `5` | 并发渲染数量 |
 | `force` | `boolean` | `false` | 强制重新渲染，忽略已有产物 |
 | `maxAge` | `number` | `60` | 产物有效期（分钟），`0` 表示总是重新渲染 |
+| `resume` | `boolean \| ResumeOptions` | `false` | 断点续传，中断后从上次进度继续，详见 [断点续传](#断点续传) |
+| `buildId` | `string` | 自动计算 | 构建指纹。变化时断点状态失效并全量重渲染 |
 | `delay` | `number` | - | 页面加载完成后的额外等待（ms） |
 | `waitUntil` | `string` | `domcontentloaded` | 页面等待策略，`networkidle0` 可等待异步接口 |
 | `waitForSelector` | `string` | `body` | 渲染前等待出现的选择器 |
@@ -255,6 +258,47 @@ console.log(result.rendered, result.skipped, result.failed);
 - 部分命中时，仅渲染缺失与已过期的路由
 - `force: true`（或 CLI `--force`）强制全量重新渲染
 - `maxAge: 0`（或 CLI `--max-age 0`）表示每次都重新渲染
+
+### 断点续传
+
+路由数量多、单页渲染耗时长时，一次预渲染可能持续几十分钟。构建被 Ctrl+C、CI 超时或进程崩溃中断后，
+`resume` 可让下一次运行从中断处继续，而不是从头再来：
+
+```ts
+await prerender({
+  routes,
+  outDir: 'dist/web',
+  resume: true, // 状态文件默认 <outDir>/.prerender-state.json
+  // buildId: process.env.GIT_COMMIT_SHA, // 建议 CI 显式指定
+  // resume: { file: 'node_modules/.cache/prerender-kit/state.json' },
+});
+```
+
+CLI：`prkit --resume [--build-id <id>] ...`
+
+设计要点：
+
+| 机制 | 说明 |
+| --- | --- |
+| 实时落盘 | 状态按时间节流实时写入，进程被强杀最多丢失最近 0.5 秒内完成的进度 |
+| 原子写入 | 产物先写 `.tmp` 再 rename，中断不会留下半截 HTML 被误判为「已完成」 |
+| 失败自动重试 | 上次失败的路由保持在队列中，下次运行自动重试 |
+| 构建指纹 | `buildId` 或 `assets/` 文件名（自带 content hash）作为指纹，变化时状态失效并全量重渲染 |
+| 产物校验 | 状态命中但产物文件被删除、或 mtime/size 与记录不一致（被外部改写）时，重新渲染该路由 |
+
+开启 `resume` 后**以状态为唯一判据**，`maxAge` 不再参与判断（`maxAge` 仅在未开启 `resume` 时生效）。
+这不是功能退化而是修正：新鲜度只能说明「文件新」，无法说明「是谁写的」，
+典型场景就是 `/` 的产物等于构建入口 `index.html`——每次构建都会覆写它，
+按新鲜度会永远判定为「已渲染」，导致首页始终拿不到预渲染内容。
+
+> 为什么需要「构建指纹」：仅凭「产物存在」无法区分「本次构建渲染的」与「上次构建遗留的陈旧产物」。
+> 指纹不一致时，即使产物仍在 `maxAge` 有效期内也会重新渲染。
+>
+> 指纹来源刻意**不包含** `<outDir>/index.html`——预渲染 `/` 会覆写该文件，
+> 若纳入指纹会导致同一份构建的两次运行指纹不同、状态自我失效。
+> 无 `assets/` 目录且未指定 `buildId` 时指纹为空，退化为「仅按完成状态续跑」，建议在 CI 显式传入 `buildId`。
+
+相关 API 已导出：`loadState` / `saveState` / `createState` / `isRouteResumable` / `resolveSignature` / `resolveStateFile` / `writeFileAtomic`。
 
 ### 链接自动发现
 
@@ -487,7 +531,7 @@ const ssrRenderer = (): Renderer => ({
 | `concurrency` | `concurrency` |
 | `callback` | `callback` |
 | `hashHistory` | `hashHistory` |
-| - | 新增 `baseUrl`、`force`、`maxAge`、`outputFile`、`renderer` |
+| - | 新增 `baseUrl`、`force`、`maxAge`、`resume`、`buildId`、`outputFile`、`renderer` |
 
 `publicHtml`、`scss` 等与预渲染无关的能力不再内置，建议交由 `callback` 或独立工具处理。
 
