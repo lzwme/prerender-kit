@@ -1,0 +1,17 @@
+# local dir
+node_modules/
+dist/
+cache/
+tmp/
+coverage/
+.idea/
+.vscode/
+test/fixtures/.tmp/
+
+# local files
+*.log
+.DS_Store
+
+yarn.lock
+package-lock.json
+pnpm-lock.yaml

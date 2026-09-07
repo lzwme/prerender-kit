@@ -1,0 +1,4 @@
+# pnpm 会自动写入构建脚本授权等设置
+allowBuilds:
+  # puppeteer 为可选 peer 依赖，安装时不下载 Chromium
+  puppeteer: false
